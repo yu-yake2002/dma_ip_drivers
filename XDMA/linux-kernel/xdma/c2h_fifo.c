@@ -40,7 +40,8 @@ struct xdma_c2h_fifo {
 
 bool xdma_fifo_enabled(struct xdma_engine *engine)
 {
-	return c2h_fifo_slots && engine->streaming &&
+	/* An explicit pool SETUP takes ownership before the first read. */
+	return !engine->c2h_pool && c2h_fifo_slots && engine->streaming &&
 		engine->dir == DMA_FROM_DEVICE;
 }
 

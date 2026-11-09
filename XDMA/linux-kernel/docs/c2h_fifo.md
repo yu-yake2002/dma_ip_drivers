@@ -125,3 +125,17 @@ segmented fork checking were exercised. Those versions used a hardcoded
 or explicit packet length. They do not constitute hardware validation of
 the latest first-read-derived sizing change. The fixed-packet assumption
 is essential to all these results.
+
+## Explicit persistent receive pools
+
+An application may select the separate persistent-pool interface from
+`xdma_c2h_pool.h` with `XDMA_IOCTL_C2H_POOL_SETUP` before its first read.
+This explicitly selected pool takes precedence over the default FIFO,
+including when `c2h_fifo_slots` is nonzero. The pool supplies its own packet
+length and permits one read to consume multiple completed packets.
+
+SETUP returns `EBUSY` if the FIFO has already started on that engine.
+The two paths never own the engine simultaneously. Applications using
+ordinary reads without SETUP retain the FIFO behavior documented above.
+Stopping a pool restores the ordinary receive path; the next read can
+initialize the FIFO when enabled.
