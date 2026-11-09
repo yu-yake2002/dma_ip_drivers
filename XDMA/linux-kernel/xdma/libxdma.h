@@ -448,6 +448,8 @@ struct xdma_transfer {
 #define XENGINE_OPEN_BIT 0L
 #define XENGINE_BUSY_BIT 1L
 
+struct xdma_c2h_pool;
+
 struct xdma_engine {
 	unsigned int magic;	/* structure ID for sanity checks */
 	struct xdma_dev *xdev;	/* parent device */
@@ -478,6 +480,7 @@ struct xdma_engine {
 	const unsigned desc_max;		/* max # descriptors per xfer */
 	struct xdma_transfer_params transfer_params;
 	struct xdma_transfer transfer;
+	struct xdma_c2h_pool *c2h_pool; /* opt-in persistent C2H resources */
 	struct dma_pool *desc_pool;/*DMA pool for descriptors*/
 	struct completion engine_compl;	
 	/* only used for MSIX mode to store per-engine interrupt mask value */
@@ -564,6 +567,14 @@ int xdma_user_isr_enable(void *dev_hndl, unsigned int mask);
 void xdma_device_offline(struct pci_dev *pdev, void *dev_handle);
 void xdma_device_online(struct pci_dev *pdev, void *dev_handle);
 ssize_t xdma_xfer_submit(struct xdma_engine *engine);
+int xdma_c2h_pool_setup(struct xdma_engine *engine, unsigned long arg);
+ssize_t xdma_c2h_pool_read(struct xdma_engine *engine, char __user *buf, size_t count);
+int xdma_c2h_pool_stats(struct xdma_engine *engine, unsigned long arg);
+int xdma_c2h_pool_diagnostics(struct xdma_engine *engine, unsigned long arg);
+int xdma_c2h_pool_stop(struct xdma_engine *engine);
+int xdma_c2h_pool_layout(struct xdma_engine *engine, unsigned long arg);
+int xdma_c2h_pool_advance(struct xdma_engine *engine, unsigned long arg);
+int xdma_c2h_pool_mmap(struct xdma_engine *engine, struct vm_area_struct *vma);
 struct xdma_transfer *engine_cyclic_stop(struct xdma_engine *engine);
 void enable_perf(struct xdma_engine *engine, bool enable);
 int get_perf_stats(struct xdma_engine *engine, struct xdma_performance_ioctl *__user user_perf_res);

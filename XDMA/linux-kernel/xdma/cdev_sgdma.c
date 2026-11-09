@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include "xdma_cdev.h"
 #include "xdma_ioctl.h"
+#include "xdma_c2h_pool.h"
 
 
 
@@ -65,7 +66,10 @@ static ssize_t char_sgdma_read_write(struct file *filp, const char __user *buf,
 	/*doesn't really matter in this case. setup is performed according engine direction*/
 	engine->transfer_params.dir=engine->dir;
 #endif
-	rv = xdma_xfer_submit(engine);
+	if (engine->c2h_pool)
+		rv = xdma_c2h_pool_read(engine, (char __user *)buf, count);
+	else
+		rv = xdma_xfer_submit(engine);
 	
 	if(!engine->streaming && !engine->non_incr_addr &&(rv>0))
 		*pos+=rv;
@@ -187,6 +191,10 @@ static int ioctl_do_submit_transfer(struct xdma_engine *engine, unsigned long ar
 #ifdef __LIBXDMA_DEBUG__
 	engine->transfer_params.dir= (transfer_mode==XDMA_H2C) ? DMA_TO_DEVICE: DMA_FROM_DEVICE;
 #endif
+	if (engine->c2h_pool) {
+		rv = -EBUSY;
+		goto exit;
+	}
 	transfer_res=xdma_xfer_submit(engine);
 	
 	if(unlikely(transfer_res<0))
@@ -210,6 +218,38 @@ static int ioctl_do_submit_transfer(struct xdma_engine *engine, unsigned long ar
 	return rv;	
 }
 	
+static int ioctl_do_c2h_pool(struct xdma_engine *engine, unsigned int cmd,
+			     unsigned long arg)
+{
+	int rv;
+
+	if (test_and_set_bit(XENGINE_BUSY_BIT, &engine->flags))
+		return -EBUSY;
+	switch (cmd) {
+	case XDMA_IOCTL_C2H_POOL_SETUP:
+		rv = xdma_c2h_pool_setup(engine, arg);
+		break;
+	case XDMA_IOCTL_C2H_POOL_STATS:
+		rv = xdma_c2h_pool_stats(engine, arg);
+		break;
+	case XDMA_IOCTL_C2H_POOL_DIAGNOSTICS:
+		rv = xdma_c2h_pool_diagnostics(engine, arg);
+		break;
+	case XDMA_IOCTL_C2H_POOL_LAYOUT:
+		rv = xdma_c2h_pool_layout(engine, arg);
+		break;
+	case XDMA_IOCTL_C2H_POOL_ADVANCE:
+		rv = xdma_c2h_pool_advance(engine, arg);
+		break;
+	default:
+		rv = xdma_c2h_pool_stop(engine);
+		break;
+	}
+	clear_bit(XENGINE_BUSY_BIT, &engine->flags);
+	smp_mb__after_atomic();
+	return rv;
+}
+
 static long char_sgdma_ioctl(struct file *filp, unsigned int cmd,
 		unsigned long arg)
 {
@@ -229,6 +269,14 @@ static long char_sgdma_ioctl(struct file *filp, unsigned int cmd,
 		return -EBUSY;
 		
 	switch (cmd) {
+	case XDMA_IOCTL_C2H_POOL_SETUP:
+	case XDMA_IOCTL_C2H_POOL_STATS:
+	case XDMA_IOCTL_C2H_POOL_STOP:
+	case XDMA_IOCTL_C2H_POOL_DIAGNOSTICS:
+	case XDMA_IOCTL_C2H_POOL_LAYOUT:
+	case XDMA_IOCTL_C2H_POOL_ADVANCE:
+		rv = ioctl_do_c2h_pool(engine, cmd, arg);
+		break;
 	case XDMA_IOCTL_PERF_TEST:
 		rv = ioctl_do_perf_test(engine, arg);
 		break;
@@ -270,6 +318,12 @@ static int char_sgdma_open(struct inode *inode, struct file *filp)
 	//don't allow to open the engine more than once
 	if(test_and_set_bit(XENGINE_OPEN_BIT, &(engine->flags)))
 		return -EBUSY;
+	/* Retry a quarantined pool from a previous abnormal close. */
+	if (engine->c2h_pool) {
+		ret_val = xdma_c2h_pool_stop(engine);
+		if (ret_val)
+			goto not_open;
+	}
 	/*Should never ever happen otherwise something went horribly wrong*/
 	xdma_debug_assert_msg((engine->dir==DMA_TO_DEVICE)||(engine->dir==DMA_FROM_DEVICE), 
 		"Unexpected direction of XDMA engine", -ENODEV);
@@ -337,6 +391,10 @@ static int char_sgdma_close(struct inode *inode, struct file *filp)
 
 	engine = xcdev->engine;
 
+	/* VFS holds an outstanding read reference, so release cannot race
+	 * a live read. A failed stop retains DMA memory and pins the module. */
+	rv = xdma_c2h_pool_stop(engine);
+
 	/* Safety: clear BUSY_BIT in case of abnormal exit (e.g. kernel oops
 	 * during xdma_xfer_submit prevented normal clear in read_write path) */
 	if (test_and_clear_bit(XENGINE_BUSY_BIT, &(engine->flags)))
@@ -344,8 +402,26 @@ static int char_sgdma_close(struct inode *inode, struct file *filp)
 
 	clear_bit(XENGINE_OPEN_BIT, &(engine->flags));
 	smp_mb__after_atomic();
-	return 0;
+	return rv;
 }
+static int char_sgdma_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	struct xdma_cdev *xcdev = filp->private_data;
+	struct xdma_engine *engine = xcdev->engine;
+	int rv;
+
+	rv = xcdev_check(__func__, xcdev, 1);
+	if (rv)
+		return rv;
+	if (xdma_device_test_offline(xcdev->xdev) ||
+	    test_and_set_bit(XENGINE_BUSY_BIT, &engine->flags))
+		return -EBUSY;
+	rv = xdma_c2h_pool_mmap(engine, vma);
+	clear_bit(XENGINE_BUSY_BIT, &engine->flags);
+	smp_mb__after_atomic();
+	return rv;
+}
+
 static const struct file_operations sgdma_fops = {
 	.owner = THIS_MODULE,
 	.open = char_sgdma_open,
@@ -353,6 +429,7 @@ static const struct file_operations sgdma_fops = {
 	.write = char_sgdma_read_write,
 	.read = char_sgdma_read,
 	.unlocked_ioctl = char_sgdma_ioctl,
+	.mmap = char_sgdma_mmap,
 	.llseek = char_llseek,
 };
 

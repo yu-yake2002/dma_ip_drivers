@@ -1380,6 +1380,7 @@ static void engine_free_resource(struct xdma_engine *engine)
 
 static int engine_destroy(struct xdma_dev *xdev, struct xdma_engine *engine)
 {
+	int pool_rv;
 	xdma_debug_assert_ptr(xdev);
 
 	xdma_debug_assert_ptr(engine);
@@ -1401,6 +1402,11 @@ static int engine_destroy(struct xdma_dev *xdev, struct xdma_engine *engine)
 		write_register(reg_value, &reg->credit_mode_enable_w1c, 0);
 	}
 
+
+	/* A failed stop retains every pool DMA target; never free live memory. */
+	pool_rv = xdma_c2h_pool_stop(engine);
+	if (pool_rv)
+		return pool_rv;
 
 	/* Release memory allocated for engine use*/
 	engine_free_resource(engine);
